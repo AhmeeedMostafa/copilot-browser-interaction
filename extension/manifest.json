@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Copilot browser interaction",
-  "version": "0.2.0",
+  "version": "0.8.2",
   "description": "Lets VS Code Copilot browse and test approved tabs in your real Chrome or Edge profile.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArUQDs+unzU1ihYWkKJpYTa/tK76RsiDlISwa5xbcqA90QexnoGjNdPFY7LHd1m/GtDockiBzofgm63XyjrbtkUV+5PuBOXscj9PMnLEpe/xMKBqMpsLwjSNMRFaiAaVQ0G8u2nqbwMCMWVNc8FdWuBuGdrC7c8aq4SxTI7dUbomvAkiA8dW09p4WGuW8ZnLoMhYRmfLLupwRocc788a5ZWqPkceZ70ndMnAYB3pPxiZ5tmWtepOQhBpx6ZCsPbtvuOzr2HfrTfsFmG0TP1ySKh14stDDr+TiqhgIW2febBmb+16frU3F0Wc2If6MqNupC7eU6B5I6a6MZ/nYyCe3LQIDAQAB",
   "permissions": [
@@ -18,8 +18,20 @@
   "background": {
     "service_worker": "background.js"
   },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_title": "Copilot browser interaction",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }

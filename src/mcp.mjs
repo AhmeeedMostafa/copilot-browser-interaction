@@ -1,20 +1,34 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { bridgeAddress, createLineDecoder, writeLine } from "./protocol.mjs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createLineDecoder, daemonAddress, writeLine } from "./protocol.mjs";
+
+const VERSION = "0.8.2";
+const daemonScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
 
 const tools = [
   {
+    name: "start_browser_session",
+    description: "Start an isolated browser session for this conversation. Call once before any other browser tool and reuse the returned sessionId for every later call.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    annotations: { readOnlyHint: true }
+  },
+  {
     name: "list_browser_tabs",
-    description: "List only tabs opened by this Copilot bridge. User-owned tabs are never returned.",
+    description: "List only tabs opened by this Copilot bridge, optionally in Chrome or Edge. User-owned tabs are never returned.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true }
   },
   {
     name: "open_browser_tab",
-    description: "Open an HTTP(S) tab in the real Chrome or Edge profile and add it to the VSC Copilot Mngd group.",
+    description: "Open an HTTP(S) tab in the requested real Chrome or Edge profile and add it to the VSC Copilot Mngd group.",
     inputSchema: {
       type: "object",
       properties: {
@@ -271,110 +285,143 @@ const tools = [
       required: ["tabId", "width", "height"],
       additionalProperties: false
     }
+  },
+  {
+    name: "end_browser_session",
+    description: "Finish browser work by detaching debugger sessions and clearing transient console/dialog state. Managed tabs remain open and approved.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    }
   }
 ];
 
-const browserMethods = {
-  list_browser_tabs: "list_tabs",
-  open_browser_tab: "open_tab",
-  close_browser_tab: "close_tab",
-  navigate_browser_tab: "navigate_tab",
-  browser_tab_history: "history",
-  read_browser_tab: "read_page",
-  take_browser_screenshot: "screenshot",
-  click_browser_element: "click",
-  type_in_browser_element: "type",
-  press_browser_key: "press_key",
-  hover_browser_element: "hover",
-  drag_browser_element: "drag",
-  select_browser_option: "select",
-  scroll_browser_tab: "scroll",
-  wait_for_browser: "wait_for",
-  handle_browser_dialog: "handle_dialog",
-  highlight_browser_text: "highlight_text",
-  read_browser_console: "console",
-  resize_browser_viewport: "resize"
+const browserProperty = {
+  type: "string",
+  enum: ["chrome", "edge"],
+  description: "Target browser. Required when both Chrome and Edge are connected unless tab ownership is already known."
 };
+for (const tool of tools) {
+  if (tool.name !== "start_browser_session") {
+    tool.inputSchema.properties.browser = browserProperty;
+    tool.inputSchema.properties.sessionId = {
+      type: "string",
+      description: "Session ID returned by start_browser_session in this conversation."
+    };
+    tool.inputSchema.required = [...new Set([...(tool.inputSchema.required ?? []), "sessionId"])];
+  }
+}
 
-let browser;
 const pending = new Map();
-const socketServer = net.createServer((socket) => {
-  browser?.destroy();
-  browser = socket;
+let daemonSocket;
 
+function attachDaemonSocket(socket) {
+  daemonSocket = socket;
   socket.on("data", createLineDecoder((message) => {
     const request = pending.get(message.id);
     if (!request) return;
     clearTimeout(request.timer);
     pending.delete(message.id);
-    if (message.error) request.reject(new Error(message.error));
+    if (message.error) request.reject(new Error(message.error.message));
     else request.resolve(message.result);
   }));
-
   socket.once("close", () => {
-    if (browser === socket) browser = undefined;
+    if (daemonSocket === socket) daemonSocket = undefined;
     for (const [id, request] of pending) {
       clearTimeout(request.timer);
-      request.reject(new Error("Browser extension disconnected"));
+      request.reject(new Error("Persistent browser daemon disconnected"));
       pending.delete(id);
     }
   });
-});
-
-async function startBridge() {
-  const address = bridgeAddress();
-  if (process.platform !== "win32") {
-    fs.mkdirSync(path.dirname(address), { recursive: true, mode: 0o700 });
-    fs.chmodSync(path.dirname(address), 0o700);
-    await removeStaleSocket(address);
-  }
-
-  await new Promise((resolve, reject) => {
-    socketServer.once("error", reject);
-    socketServer.listen(address, resolve);
-  });
-  if (process.platform !== "win32") fs.chmodSync(address, 0o600);
 }
 
-async function removeStaleSocket(address) {
-  if (!fs.existsSync(address)) return;
-
-  await new Promise((resolve, reject) => {
-    const probe = net.createConnection(address);
-    probe.once("connect", () => {
-      probe.destroy();
-      reject(new Error("Another Copilot browser interaction MCP server is already running"));
-    });
-    probe.once("error", (error) => {
-      if (error.code !== "ECONNREFUSED" && error.code !== "ENOENT") {
-        reject(error);
-        return;
-      }
-      fs.rmSync(address);
-      resolve();
-    });
-  });
-}
-
-function callBrowser(method, args) {
-  if (!browser || browser.destroyed) {
-    return Promise.reject(new Error("Browser extension is not connected. Start Chrome or Edge and enable Copilot browser interaction."));
+function requestDaemon(method, params = {}) {
+  if (!daemonSocket || daemonSocket.destroyed) {
+    return Promise.reject(new Error("Persistent browser daemon is not connected"));
   }
-
   const id = randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error("Browser command timed out"));
-    }, 35000);
+      reject(new Error("Persistent browser daemon timed out"));
+    }, 40000);
     pending.set(id, { resolve, reject, timer });
-    writeLine(browser, { id, method, args });
+    writeLine(daemonSocket, { id, method, params });
   });
+}
+
+async function ensureDaemon() {
+  let socket = await tryConnectDaemon();
+  if (!socket) {
+    spawnDaemon();
+    socket = await waitForDaemon();
+  }
+  attachDaemonSocket(socket);
+
+  const info = await requestDaemon("info");
+  if (info.version === VERSION) return;
+
+  await requestDaemon("shutdown");
+  daemonSocket?.destroy();
+  daemonSocket = undefined;
+  spawnDaemon();
+  attachDaemonSocket(await waitForDaemon());
+  const restarted = await requestDaemon("info");
+  if (restarted.version !== VERSION) {
+    throw new Error(`Persistent daemon version mismatch: expected ${VERSION}, got ${restarted.version}`);
+  }
+}
+
+function tryConnectDaemon() {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(daemonAddress());
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(undefined);
+    }, 250);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      resolve(socket);
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      socket.destroy();
+      if (error.code === "ENOENT" || error.code === "ECONNREFUSED") resolve(undefined);
+      else reject(error);
+    });
+  });
+}
+
+async function waitForDaemon() {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const socket = await tryConnectDaemon();
+    if (socket) return socket;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Persistent browser daemon did not start");
+}
+
+function spawnDaemon() {
+  const child = spawn(process.execPath, [daemonScript], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: process.env
+  });
+  child.unref();
 }
 
 function validateArguments(name, args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Tool arguments must be an object");
+  if (name === "start_browser_session") return;
+  if (args.browser !== undefined && !["chrome", "edge"].includes(args.browser)) {
+    throw new Error("browser must be chrome or edge");
+  }
+  requireString(args.sessionId, "sessionId");
   if (name === "list_browser_tabs") return;
+  if (name === "end_browser_session") return;
   if (name === "open_browser_tab") {
     requireString(args.url, "url");
     if (args.active !== undefined && typeof args.active !== "boolean") throw new Error("active must be a boolean");
@@ -466,9 +513,12 @@ function requireString(value, name) {
 
 async function runTool(name, args) {
   validateArguments(name, args);
-  const method = browserMethods[name];
-  if (!method) throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32602 });
-  return callBrowser(method, args);
+  if (name === "start_browser_session") return requestDaemon("start_session");
+  return requestDaemon("call", {
+    sessionId: args.sessionId,
+    name,
+    arguments: args
+  });
 }
 
 function toolResult(name, value) {
@@ -493,8 +543,8 @@ async function handleMessage(message) {
         result = {
           protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
-          serverInfo: { name: "copilot-browser-interaction", version: "0.2.0" },
-          instructions: "Use this server for real-browser and E2E work. Open a Copilot-owned tab first; user-owned tabs are inaccessible. Page access follows the extension's per-site or per-tab approval setting."
+          serverInfo: { name: "copilot-browser-interaction", version: VERSION },
+          instructions: "Use this server for real-browser and E2E work. FIRST call start_browser_session once per conversation and reuse its sessionId in every later browser tool call. Never reuse or reveal a sessionId from another conversation. Browser connections persist through a per-user daemon shared across VS Code. When the user names Chrome or Edge, pass that browser explicitly. Open a Copilot-owned tab first; user-owned tabs are inaccessible until explicitly shared. Page access follows the extension's approval settings. After finishing, call end_browser_session once without a browser to detach every browser used by this conversation and invalidate its sessionId, unless the user asks to keep debugging attached."
         };
         break;
       case "ping":
@@ -529,15 +579,10 @@ async function handleMessage(message) {
   }
 }
 
-async function shutdown() {
-  await new Promise((resolve) => socketServer.close(resolve));
-  if (process.platform !== "win32") fs.rmSync(bridgeAddress(), { force: true });
-}
-
 try {
-  await startBridge();
+  await ensureDaemon();
   process.stdin.on("data", createLineDecoder((message) => void handleMessage(message)));
-  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("end", () => daemonSocket?.destroy());
 } catch (error) {
   console.error(error.message);
   process.exit(1);

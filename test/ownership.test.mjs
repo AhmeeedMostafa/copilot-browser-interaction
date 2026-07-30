@@ -15,6 +15,7 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   ]);
   const groupUpdates = [];
   const debuggerCommands = [];
+  const ungroupedTabs = [];
   let siteAllowed = false;
   let nextId = 2;
   const listeners = [];
@@ -50,6 +51,10 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
         for (const id of tabIds) tabs.set(id, { ...tabs.get(id), groupId });
         return groupId;
       },
+      ungroup: async (tabId) => {
+        ungroupedTabs.push(tabId);
+        tabs.set(tabId, { ...tabs.get(tabId), groupId: -1 });
+      },
       goBack: async () => {},
       goForward: async () => {},
       reload: async () => {},
@@ -79,7 +84,14 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
       onDetach: sharedEvent
     }
   };
-  const context = vm.createContext({ chrome, URL, setTimeout, clearTimeout, console });
+  const context = vm.createContext({
+    chrome,
+    navigator: { userAgent: "Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36" },
+    URL,
+    setTimeout,
+    clearTimeout,
+    console
+  });
   vm.runInContext(source, context);
   const command = (method, args = {}) => vm.runInContext(
     `runCommand(${JSON.stringify(method)}, ${JSON.stringify(args)})`,
@@ -87,8 +99,12 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   );
 
   assert.equal((await command("list_tabs")).length, 0);
-  const opened = await command("open_tab", { url: "https://example.com/" });
+  const opened = await command("open_tab", {
+    url: "https://example.com/",
+    sessionId: "session-a"
+  });
   assert.equal(opened.id, 2);
+  assert.equal(sessionStored["agentTab:2"], "copilot:session-a");
   assert.equal(opened.groupId, 7);
   assert.deepEqual(groupUpdates, [{
     groupId: 7,
@@ -96,10 +112,38 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
     color: "blue",
     collapsed: false
   }]);
-  assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);
+  const listed = await command("list_tabs");
+  assert.deepEqual(Array.from(listed, (tab) => tab.id), [2]);
+  assert.equal(listed[0].source, "copilot");
+  assert.equal(listed[0].sessionId, "session-a");
   await assert.rejects(command("navigate_tab", { tabId: 1, url: "https://example.com/" }), /not opened by Copilot/);
 
+  const shared = await vm.runInContext("shareTab(1, true)", context);
+  assert.equal(shared.groupId, 7);
+  assert.equal(sessionStored["agentTab:1"], "shared");
+  assert.equal(sessionStored["approvedTab:1"], true);
+  assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id).sort(), [1, 2]);
+  await vm.runInContext("unshareTab(1)", context);
+  assert.deepEqual(ungroupedTabs, [1]);
+  assert.equal(sessionStored["agentTab:1"], undefined);
+  assert.equal(sessionStored["approvedTab:1"], undefined);
+  assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);
+
+  delete sessionStored["approvedTab:2"];
+  localStored.approvalMode = "site";
+  localStored.autoApproveCopilotTabs = true;
+  siteAllowed = false;
+  assert.equal((await command("read_page", { tabId: 2 })).title, "Mock page");
+
+  sessionStored["agentTab:1"] = "shared";
+  await assert.rejects(command("read_page", { tabId: 1 }), /Site access is not granted/);
+  delete sessionStored["agentTab:1"];
+
+  localStored.autoApproveCopilotTabs = false;
+  await assert.rejects(command("read_page", { tabId: 2 }), /Site access is not granted/);
+
   sessionStored["approvedTab:2"] = true;
+  localStored.approvalMode = "tab";
   await command("navigate_tab", { tabId: 2, url: "https://another.example/" });
   assert.equal((await command("read_page", { tabId: 2 })).url, "https://another.example/");
   const screenshot = await command("screenshot", { tabId: 2, fullPage: true });
@@ -110,6 +154,9 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   await assert.rejects(command("read_page", { tabId: 2 }), /Site access is not granted/);
   siteAllowed = true;
   assert.equal((await command("read_page", { tabId: 2 })).title, "Mock page");
+  const ended = await command("end_session", { sessionId: "session-a" });
+  assert.equal(ended.detachedTabs, 1);
+  assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);
 });
 
 function storageArea(values) {

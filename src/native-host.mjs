@@ -3,6 +3,7 @@ import net from "node:net";
 import { bridgeAddress, createLineDecoder, createNativeDecoder, encodeNative, writeLine } from "./protocol.mjs";
 
 let bridge;
+let browserHello;
 let retryTimer;
 let closed = false;
 
@@ -16,6 +17,7 @@ function connectBridge() {
   const candidate = net.createConnection(bridgeAddress());
   candidate.once("connect", () => {
     bridge = candidate;
+    if (browserHello) writeLine(candidate, browserHello);
     sendToExtension({ event: "bridge_status", connected: true });
   });
   candidate.on("data", createLineDecoder(sendToExtension));
@@ -30,6 +32,7 @@ function connectBridge() {
 }
 
 const decodeNative = createNativeDecoder((message) => {
+  if (message.event === "browser_hello") browserHello = message;
   if (bridge && !bridge.destroyed) writeLine(bridge, message);
 });
 

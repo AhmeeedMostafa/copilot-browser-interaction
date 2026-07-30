@@ -12,9 +12,11 @@ function connectNativeHost() {
   if (nativePort) return;
 
   nativePort = chrome.runtime.connectNative(HOST_NAME);
+  nativePort.postMessage(browserHello());
   nativePort.onMessage.addListener(async (message) => {
     if (message.event === "bridge_status") {
       mcpConnected = message.connected;
+      if (message.connected) nativePort?.postMessage(browserHello());
       return;
     }
     if (!message.id || !message.method) return;
@@ -38,10 +40,18 @@ function connectNativeHost() {
   });
 }
 
+function browserHello() {
+  return {
+    event: "browser_hello",
+    browser: /\bEdg\//.test(navigator.userAgent) ? "edge" : "chrome"
+  };
+}
+
 async function runCommand(method, args) {
   switch (method) {
     case "list_tabs": return listTabs();
     case "open_tab": return openTab(args);
+    case "assign_tab": return assignTab(args);
     case "close_tab": return closeTab(args);
     case "navigate_tab": return navigateTab(args);
     case "history": return useHistory(args);
@@ -59,34 +69,44 @@ async function runCommand(method, args) {
     case "highlight_text": return highlightText(args);
     case "console": return readConsole(args);
     case "resize": return resizeViewport(args);
+    case "end_session": return endBrowserSession(args);
     default: throw new Error(`Unknown browser command: ${method}`);
   }
 }
 
 async function listTabs() {
   const stored = await chrome.storage.session.get(null);
-  const ids = Object.keys(stored)
-    .filter((key) => key.startsWith("agentTab:"))
-    .map((key) => Number(key.slice("agentTab:".length)));
-  const tabs = await Promise.all(ids.map(async (id) => {
+  const entries = Object.entries(stored)
+    .filter(([key]) => key.startsWith("agentTab:"))
+    .map(([key, owner]) => ({
+      id: Number(key.slice("agentTab:".length)),
+      owner: String(owner)
+    }));
+  const tabs = await Promise.all(entries.map(async ({ id, owner }) => {
     try {
-      return await chrome.tabs.get(id);
+      const [source, sessionId] = owner.split(":");
+      return {
+        ...tabDetails(await chrome.tabs.get(id)),
+        source,
+        ...(sessionId ? { sessionId } : {})
+      };
     } catch {
       await forgetTab(id);
       return undefined;
     }
   }));
-  return tabs.filter(Boolean).map(tabDetails);
+  return tabs.filter(Boolean);
 }
 
-async function openTab({ url, active = true }) {
+async function openTab({ url, active = true, sessionId }) {
   const target = webUrl(url);
   if (typeof active !== "boolean") throw new Error("active must be a boolean");
+  requireSessionId(sessionId);
 
   const tab = await chrome.tabs.create({ url: target, active });
   try {
-    await chrome.storage.session.set({ [`agentTab:${tab.id}`]: true });
-    await groupAgentTab(tab);
+    await chrome.storage.session.set({ [`agentTab:${tab.id}`]: `copilot:${sessionId}` });
+    await groupAgentTab(tab, sessionId);
     return tabDetails(await chrome.tabs.get(tab.id));
   } catch (error) {
     await chrome.tabs.remove(tab.id);
@@ -94,13 +114,57 @@ async function openTab({ url, active = true }) {
   }
 }
 
-async function groupAgentTab(tab) {
-  const groups = await chrome.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
-  const existing = groups.find((group) => group.title === GROUP_TITLE);
-  const groupId = await chrome.tabs.group({
-    tabIds: [tab.id],
-    ...(existing ? { groupId: existing.id } : {})
+async function assignTab({ tabId, sessionId }) {
+  requireSessionId(sessionId);
+  const tab = await agentTab(tabId);
+  const key = `agentTab:${tabId}`;
+  const owner = String((await chrome.storage.session.get(key))[key]);
+  const source = owner.startsWith("shared") ? "shared" : "copilot";
+  await chrome.storage.session.set({ [key]: `${source}:${sessionId}` });
+  await groupAgentTab(tab, sessionId);
+  return tabDetails(await chrome.tabs.get(tabId));
+}
+
+async function shareTab(tabId, approveTab) {
+  if (!Number.isInteger(tabId)) throw new Error("tabId must be an integer");
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.url || !/^https?:\/\//.test(tab.url)) {
+    throw new Error("Only HTTP(S) tabs can be shared");
+  }
+
+  await groupAgentTab(tab);
+  await chrome.storage.session.set({
+    [`agentTab:${tab.id}`]: "shared",
+    ...(approveTab ? { [`approvedTab:${tab.id}`]: true } : {})
   });
+  return tabDetails(await chrome.tabs.get(tab.id));
+}
+
+async function unshareTab(tabId) {
+  const tab = await agentTab(tabId);
+  await detachDebugger(tabId);
+  await forgetTab(tabId);
+  if (tab.groupId >= 0) await chrome.tabs.ungroup(tabId);
+  return { unshared: tabId };
+}
+
+async function groupAgentTab(tab, sessionId) {
+  const groupKey = sessionId ? `agentGroup:${tab.windowId}:${sessionId}` : undefined;
+  let groupId = groupKey ? (await chrome.storage.session.get(groupKey))[groupKey] : undefined;
+  if (groupId !== undefined) {
+    try {
+      await chrome.tabGroups.get(groupId);
+    } catch {
+      await chrome.storage.session.remove(groupKey);
+      groupId = undefined;
+    }
+  }
+
+  groupId = await chrome.tabs.group({
+    tabIds: [tab.id],
+    ...(groupId === undefined ? {} : { groupId })
+  });
+  if (groupKey) await chrome.storage.session.set({ [groupKey]: groupId });
   await chrome.tabGroups.update(groupId, {
     title: GROUP_TITLE,
     color: "blue",
@@ -154,6 +218,16 @@ async function approvedTab(tabId) {
     throw new Error("Only HTTP(S) tabs are supported");
   }
 
+  const ownerKey = `agentTab:${tabId}`;
+  const [{ [ownerKey]: owner }, { autoApproveCopilotTabs = false }] = await Promise.all([
+    chrome.storage.session.get(ownerKey),
+    chrome.storage.local.get("autoApproveCopilotTabs")
+  ]);
+  if (owner?.startsWith("copilot") && autoApproveCopilotTabs) {
+    await ensureDebugger(tabId);
+    return tab;
+  }
+
   const mode = await approvalMode();
   if (mode === "tab") {
     const key = `approvedTab:${tabId}`;
@@ -199,7 +273,24 @@ async function detachDebugger(tabId) {
 }
 
 async function detachAllDebuggers() {
-  await Promise.all([...attachedTabs].map(detachDebugger));
+  const tabIds = [...attachedTabs];
+  await Promise.all(tabIds.map(detachDebugger));
+  return tabIds.length;
+}
+
+async function endBrowserSession({ sessionId }) {
+  requireSessionId(sessionId);
+  const stored = await chrome.storage.session.get(null);
+  const tabIds = [...attachedTabs].filter((tabId) => {
+    const owner = stored[`agentTab:${tabId}`];
+    return typeof owner === "string" && owner.endsWith(`:${sessionId}`);
+  });
+  await Promise.all(tabIds.map(detachDebugger));
+  for (const tabId of tabIds) {
+    consoleByTab.delete(tabId);
+    dialogByTab.delete(tabId);
+  }
+  return { detachedTabs: tabIds.length };
 }
 
 function sendCommand(tabId, method, params = {}) {
@@ -564,6 +655,10 @@ function requiredSelector(value) {
   return value;
 }
 
+function requireSessionId(value) {
+  if (typeof value !== "string" || !value) throw new Error("sessionId is required");
+}
+
 function webUrl(value) {
   if (typeof value !== "string") throw new Error("url must be a string");
   const parsed = new URL(value);
@@ -626,6 +721,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "approval_mode_changed") {
     detachAllDebuggers()
       .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message?.type === "share_tab") {
+    shareTab(message.tabId, message.approveTab === true)
+      .then((tab) => sendResponse({ tab }))
+      .catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message?.type === "unshare_tab") {
+    unshareTab(message.tabId)
+      .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ error: error.message }));
     return true;
   }

@@ -11,6 +11,13 @@ export function bridgeAddress() {
     : path.join(os.homedir(), ".copilot-open-tabs", "bridge.sock");
 }
 
+export function daemonAddress() {
+  if (process.env.COPILOT_BROWSER_DAEMON_SOCKET) return process.env.COPILOT_BROWSER_DAEMON_SOCKET;
+  return process.platform === "win32"
+    ? String.raw`\\.\pipe\copilot-browser-interaction-${process.env.USERNAME ?? "user"}`
+    : path.join(os.homedir(), ".copilot-open-tabs", "daemon.sock");
+}
+
 export function encodeNative(message) {
   const body = Buffer.from(JSON.stringify(message));
   if (body.length > 1024 * 1024) throw new Error("Native message exceeds Chrome's 1 MB limit");

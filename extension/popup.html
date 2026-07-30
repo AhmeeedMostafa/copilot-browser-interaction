@@ -6,7 +6,8 @@
     <title>Copilot browser interaction</title>
     <style>
       body { font: 13px system-ui, sans-serif; margin: 16px; width: 300px; }
-      h1 { font-size: 15px; margin: 0 0 12px; }
+      h1 { align-items: center; display: flex; font-size: 15px; gap: 8px; margin: 0 0 12px; }
+      h1 img { height: 24px; width: 24px; }
       label, p { display: block; margin: 10px 0; overflow-wrap: anywhere; }
       select, button { padding: 6px 10px; }
       select { display: block; margin-top: 5px; width: 100%; }
@@ -16,7 +17,7 @@
     </style>
   </head>
   <body>
-    <h1>Copilot browser interaction</h1>
+    <h1><img src="icons/icon32.png" alt="">Copilot browser interaction</h1>
     <p id="bridge">Checking local bridge…</p>
     <label>
       Approval method
@@ -25,9 +26,15 @@
         <option value="tab">Per Copilot tab</option>
       </select>
     </label>
+    <label>
+      <input id="auto-approve" type="checkbox">
+      Automatically allow tabs opened by Copilot
+    </label>
     <p id="access">Checking current tab…</p>
+    <button id="share" type="button">Share this tab with Copilot</button>
     <button id="grant" type="button">Allow</button>
     <button id="revoke" type="button">Revoke</button>
+    <button id="unshare" type="button">Stop sharing</button>
     <script src="popup.js"></script>
   </body>
 </html>
