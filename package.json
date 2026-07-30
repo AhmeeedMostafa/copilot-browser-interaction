@@ -1,0 +1,14 @@
+{
+  "name": "copilot-browser-interaction",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "configure-vscode": "node scripts/configure-vscode.mjs",
+    "install-host": "node scripts/install-host.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

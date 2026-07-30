@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "copilot-browser-interaction": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/src/mcp.mjs"
+      ]
+    }
+  }
+}
