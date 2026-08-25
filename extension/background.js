@@ -116,11 +116,9 @@ async function openTab({ url, active = true, sessionId }) {
 
 async function assignTab({ tabId, sessionId }) {
   requireSessionId(sessionId);
-  const tab = await agentTab(tabId);
-  const key = `agentTab:${tabId}`;
-  const owner = String((await chrome.storage.session.get(key))[key]);
+  const { tab, owner } = await agentTab(tabId);
   const source = owner.startsWith("shared") ? "shared" : "copilot";
-  await chrome.storage.session.set({ [key]: `${source}:${sessionId}` });
+  await chrome.storage.session.set({ [`agentTab:${tabId}`]: `${source}:${sessionId}` });
   await groupAgentTab(tab, sessionId);
   return tabDetails(await chrome.tabs.get(tabId));
 }
@@ -141,7 +139,7 @@ async function shareTab(tabId, approveTab) {
 }
 
 async function unshareTab(tabId) {
-  const tab = await agentTab(tabId);
+  const { tab } = await agentTab(tabId);
   await detachDebugger(tabId);
   await forgetTab(tabId);
   if (tab.groupId >= 0) await chrome.tabs.ungroup(tabId);
@@ -200,12 +198,13 @@ async function useHistory({ tabId, action }) {
 async function agentTab(tabId) {
   if (!Number.isInteger(tabId)) throw new Error("tabId must be an integer");
   const key = `agentTab:${tabId}`;
-  if (!(await chrome.storage.session.get(key))[key]) {
+  const owner = (await chrome.storage.session.get(key))[key];
+  if (!owner) {
     throw new Error("This tab was not opened by Copilot");
   }
 
   try {
-    return await chrome.tabs.get(tabId);
+    return { tab: await chrome.tabs.get(tabId), owner };
   } catch (error) {
     await forgetTab(tabId);
     throw error;
@@ -213,17 +212,16 @@ async function agentTab(tabId) {
 }
 
 async function approvedTab(tabId) {
-  const tab = await agentTab(tabId);
+  const { tab, owner } = await agentTab(tabId);
   if (!tab.url || !/^https?:\/\//.test(tab.url)) {
     throw new Error("Only HTTP(S) tabs are supported");
   }
 
-  const ownerKey = `agentTab:${tabId}`;
-  const [{ [ownerKey]: owner }, { autoApproveCopilotTabs = false }] = await Promise.all([
-    chrome.storage.session.get(ownerKey),
-    chrome.storage.local.get("autoApproveCopilotTabs")
-  ]);
-  if (owner?.startsWith("copilot") && autoApproveCopilotTabs) {
+  // ponytail: approvalMode/autoApproveCopilotTabs are read-mostly popup
+  // settings, cached in memory and kept correct via storage.onChanged so
+  // every action avoids 2-3 redundant chrome.storage IPC round-trips.
+  const { autoApproveCopilotTabs = false } = await getSettings();
+  if (owner.startsWith("copilot") && autoApproveCopilotTabs) {
     await ensureDebugger(tabId);
     return tab;
   }
@@ -245,8 +243,24 @@ async function approvedTab(tabId) {
   return tab;
 }
 
+let settingsCache;
+
+async function getSettings() {
+  if (!settingsCache) {
+    settingsCache = await chrome.storage.local.get(["approvalMode", "autoApproveCopilotTabs"]);
+  }
+  return settingsCache;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !settingsCache) return;
+  for (const key of ["approvalMode", "autoApproveCopilotTabs"]) {
+    if (key in changes) settingsCache[key] = changes[key].newValue;
+  }
+});
+
 async function approvalMode() {
-  const { approvalMode = "site" } = await chrome.storage.local.get("approvalMode");
+  const { approvalMode = "site" } = await getSettings();
   return approvalMode === "tab" ? "tab" : "site";
 }
 

@@ -213,6 +213,61 @@ test("shared daemon isolates conversations and browsers", async (t) => {
   }
 });
 
+test("MCP client reconnects after the daemon it was using restarts", async (t) => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const testDirectory = fs.mkdtempSync("/tmp/copilot-open-tabs-");
+  const env = {
+    ...process.env,
+    COPILOT_OPEN_TABS_SOCKET: path.join(testDirectory, "bridge.sock"),
+    COPILOT_BROWSER_DAEMON_SOCKET: path.join(testDirectory, "daemon.sock")
+  };
+
+  let daemon = spawn(process.execPath, [path.join(root, "src/daemon.mjs")], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env
+  });
+  await waitFor(() => fs.existsSync(env.COPILOT_BROWSER_DAEMON_SOCKET));
+
+  const mcp = spawn(process.execPath, [path.join(root, "src/mcp.mjs")], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env
+  });
+  t.after(() => {
+    mcp.kill();
+    daemon.kill();
+    fs.rmSync(testDirectory, { recursive: true, force: true });
+  });
+
+  const responses = new Map();
+  mcp.stdout.on("data", createLineDecoder((message) => responses.set(message.id, message)));
+  writeLine(mcp.stdin, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+  writeLine(mcp.stdin, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "start_browser_session", arguments: {} } });
+  await waitFor(() => responses.has(1) && responses.has(2));
+  assert.equal(responses.get(2).result.isError, undefined);
+
+  // Kill the daemon out from under the still-running client and replace it,
+  // simulating another conversation forcing a version-mismatch restart.
+  daemon.kill("SIGKILL");
+  await new Promise((resolve) => daemon.once("exit", resolve));
+  fs.rmSync(env.COPILOT_BROWSER_DAEMON_SOCKET, { force: true });
+  daemon = spawn(process.execPath, [path.join(root, "src/daemon.mjs")], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env
+  });
+  await waitFor(() => fs.existsSync(env.COPILOT_BROWSER_DAEMON_SOCKET));
+
+  writeLine(mcp.stdin, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "start_browser_session", arguments: {} } });
+  await waitFor(() => responses.has(3));
+  assert.equal(responses.get(3).result.isError, undefined);
+  assert.notEqual(
+    JSON.parse(responses.get(2).result.content[0].text).sessionId,
+    JSON.parse(responses.get(3).result.content[0].text).sessionId
+  );
+
+  mcp.stdin.end();
+  await new Promise((resolve) => mcp.once("exit", resolve));
+});
+
 async function nextBrowserRequest(host, method, index) {
   await waitFor(() => host.messages.filter((message) => message.method === method).length > index);
   return host.messages.filter((message) => message.method === method)[index];

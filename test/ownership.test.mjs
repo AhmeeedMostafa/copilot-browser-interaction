@@ -18,7 +18,9 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   const ungroupedTabs = [];
   let siteAllowed = false;
   let nextId = 2;
+  let localGetCalls = 0;
   const listeners = [];
+  const changeListeners = [];
   const sharedEvent = { addListener(listener) { listeners.push(listener); } };
   const chrome = {
     runtime: {
@@ -29,7 +31,18 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
     },
     storage: {
       session: storageArea(sessionStored),
-      local: storageArea(localStored)
+      local: (() => {
+        const area = storageArea(localStored, (changes) => {
+          for (const listener of changeListeners) listener(changes, "local");
+        });
+        const get = area.get;
+        area.get = (key) => {
+          localGetCalls++;
+          return get(key);
+        };
+        return area;
+      })(),
+      onChanged: { addListener(listener) { changeListeners.push(listener); } }
     },
     tabs: {
       create: async ({ url, active }) => {
@@ -97,6 +110,10 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
     `runCommand(${JSON.stringify(method)}, ${JSON.stringify(args)})`,
     context
   );
+  const setLocal = (values) => vm.runInContext(
+    `chrome.storage.local.set(${JSON.stringify(values)})`,
+    context
+  );
 
   assert.equal((await command("list_tabs")).length, 0);
   const opened = await command("open_tab", {
@@ -130,8 +147,7 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);
 
   delete sessionStored["approvedTab:2"];
-  localStored.approvalMode = "site";
-  localStored.autoApproveCopilotTabs = true;
+  await setLocal({ approvalMode: "site", autoApproveCopilotTabs: true });
   siteAllowed = false;
   assert.equal((await command("read_page", { tabId: 2 })).title, "Mock page");
 
@@ -139,34 +155,44 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   await assert.rejects(command("read_page", { tabId: 1 }), /Site access is not granted/);
   delete sessionStored["agentTab:1"];
 
-  localStored.autoApproveCopilotTabs = false;
+  await setLocal({ autoApproveCopilotTabs: false });
   await assert.rejects(command("read_page", { tabId: 2 }), /Site access is not granted/);
 
   sessionStored["approvedTab:2"] = true;
-  localStored.approvalMode = "tab";
+  await setLocal({ approvalMode: "tab" });
   await command("navigate_tab", { tabId: 2, url: "https://another.example/" });
   assert.equal((await command("read_page", { tabId: 2 })).url, "https://another.example/");
   const screenshot = await command("screenshot", { tabId: 2, fullPage: true });
   assert.equal(screenshot.data, "aW1hZ2U=");
   assert.ok(debuggerCommands.includes("Page.captureScreenshot"));
 
-  localStored.approvalMode = "site";
+  await setLocal({ approvalMode: "site" });
   await assert.rejects(command("read_page", { tabId: 2 }), /Site access is not granted/);
   siteAllowed = true;
   assert.equal((await command("read_page", { tabId: 2 })).title, "Mock page");
   const ended = await command("end_session", { sessionId: "session-a" });
   assert.equal(ended.detachedTabs, 1);
   assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);
+  // ponytail: proves the perf fix — one lazy load feeds every approvedTab()
+  // check above; later setLocal() writes only update the in-memory cache.
+  assert.equal(localGetCalls, 1);
 });
 
-function storageArea(values) {
+function storageArea(values, notify) {
   return {
     get: async (key) => {
       if (key === null) return { ...values };
       if (typeof key === "string") return Object.hasOwn(values, key) ? { [key]: values[key] } : {};
       return { ...values };
     },
-    set: async (updates) => Object.assign(values, updates),
+    set: async (updates) => {
+      const changes = {};
+      for (const [key, newValue] of Object.entries(updates)) {
+        changes[key] = { oldValue: values[key], newValue };
+      }
+      Object.assign(values, updates);
+      notify?.(changes);
+    },
     remove: async (keys) => {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
     }

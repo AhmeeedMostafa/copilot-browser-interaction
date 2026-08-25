@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createLineDecoder, daemonAddress, writeLine } from "./protocol.mjs";
 
-const VERSION = "0.8.2";
+const VERSION = "0.8.4";
 const daemonScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
 
 const tools = [
@@ -315,6 +315,7 @@ for (const tool of tools) {
 
 const pending = new Map();
 let daemonSocket;
+let ensuringDaemon;
 
 function attachDaemonSocket(socket) {
   daemonSocket = socket;
@@ -336,10 +337,7 @@ function attachDaemonSocket(socket) {
   });
 }
 
-function requestDaemon(method, params = {}) {
-  if (!daemonSocket || daemonSocket.destroyed) {
-    return Promise.reject(new Error("Persistent browser daemon is not connected"));
-  }
+function sendDaemonRequest(socket, method, params = {}) {
   const id = randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -347,8 +345,22 @@ function requestDaemon(method, params = {}) {
       reject(new Error("Persistent browser daemon timed out"));
     }, 40000);
     pending.set(id, { resolve, reject, timer });
-    writeLine(daemonSocket, { id, method, params });
+    writeLine(socket, { id, method, params });
   });
+}
+
+async function requestDaemon(method, params = {}) {
+  if (!daemonSocket || daemonSocket.destroyed) {
+    // ponytail: the daemon can restart out from under a long-lived client
+    // (e.g. a version bump triggered by another conversation); reconnect
+    // instead of failing forever. Concurrent callers share one attempt.
+    ensuringDaemon ??= ensureDaemon().finally(() => { ensuringDaemon = undefined; });
+    await ensuringDaemon;
+  }
+  if (!daemonSocket || daemonSocket.destroyed) {
+    throw new Error("Persistent browser daemon is not connected");
+  }
+  return sendDaemonRequest(daemonSocket, method, params);
 }
 
 async function ensureDaemon() {
@@ -359,15 +371,15 @@ async function ensureDaemon() {
   }
   attachDaemonSocket(socket);
 
-  const info = await requestDaemon("info");
+  const info = await sendDaemonRequest(daemonSocket, "info");
   if (info.version === VERSION) return;
 
-  await requestDaemon("shutdown");
+  await sendDaemonRequest(daemonSocket, "shutdown");
   daemonSocket?.destroy();
   daemonSocket = undefined;
   spawnDaemon();
   attachDaemonSocket(await waitForDaemon());
-  const restarted = await requestDaemon("info");
+  const restarted = await sendDaemonRequest(daemonSocket, "info");
   if (restarted.version !== VERSION) {
     throw new Error(`Persistent daemon version mismatch: expected ${VERSION}, got ${restarted.version}`);
   }
