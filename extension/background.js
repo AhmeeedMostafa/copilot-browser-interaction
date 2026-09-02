@@ -609,9 +609,26 @@ async function waitForPage({ tabId, text, textGone, selector, state = "visible",
   }
   await approvedTab(tabId);
 
-  const deadline = Date.now() + timeout;
-  do {
-    const matched = await evaluateFunction(tabId, (expected, gone, target, targetState) => {
+  // ponytail: the condition is checked inside the page via MutationObserver
+  // (near-instant) instead of polling from the extension every 200ms; a
+  // coarse 500ms safety net still covers style-only changes (e.g. a media
+  // query) that don't mutate the DOM tree/attributes. One CDP round trip
+  // total, since Runtime.evaluate awaits the returned Promise.
+  let matched;
+  try {
+    matched = await evaluateFunction(tabId, waitForConditionInPage, [
+      text ?? null, textGone ?? null, selector ?? null, state, timeout
+    ]);
+  } catch (error) {
+    throw new Error(`Waiting was interrupted, likely by page navigation: ${error.message}`);
+  }
+  if (!matched) throw new Error("Timed out waiting for the page condition");
+  return { matched: true };
+}
+
+function waitForConditionInPage(expected, gone, target, targetState, timeoutMs) {
+  return new Promise((resolve) => {
+    function check() {
       const bodyText = document.body?.innerText ?? "";
       if (expected && !bodyText.includes(expected)) return false;
       if (gone && bodyText.includes(gone)) return false;
@@ -621,12 +638,26 @@ async function waitForPage({ tabId, text, textGone, selector, state = "visible",
       if (targetState === "detached") return !element;
       const visible = Boolean(element && element.getBoundingClientRect().width && element.getBoundingClientRect().height);
       return targetState === "visible" ? visible : !visible;
-    }, [text ?? null, textGone ?? null, selector ?? null, state]);
-    if (matched) return { matched: true };
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  } while (Date.now() <= deadline);
+    }
 
-  throw new Error("Timed out waiting for the page condition");
+    function settle(result) {
+      observer.disconnect();
+      clearInterval(safetyNet);
+      clearTimeout(deadline);
+      resolve(result);
+    }
+
+    if (check()) {
+      resolve(true);
+      return;
+    }
+    const observer = new MutationObserver(() => { if (check()) settle(true); });
+    observer.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true, characterData: true
+    });
+    const safetyNet = setInterval(() => { if (check()) settle(true); }, 500);
+    const deadline = setTimeout(() => settle(false), timeoutMs);
+  });
 }
 
 async function handleDialog({ tabId, accept, promptText }) {

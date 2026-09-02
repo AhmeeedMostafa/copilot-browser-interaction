@@ -220,6 +220,71 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   assert.equal(localGetCalls, 1);
 });
 
+test("waitForConditionInPage resolves via mutation, safety net, or timeout", async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const source = fs.readFileSync(path.join(root, "extension/background.js"), "utf8");
+
+  let bodyText = "";
+  let elements = {};
+  const mutationCallbacks = [];
+  class FakeMutationObserver {
+    constructor(callback) { this.callback = callback; }
+    observe() { mutationCallbacks.push(this.callback); }
+    disconnect() {
+      const index = mutationCallbacks.indexOf(this.callback);
+      if (index !== -1) mutationCallbacks.splice(index, 1);
+    }
+  }
+  const fakeDocument = {
+    get body() { return { innerText: bodyText }; },
+    documentElement: {},
+    querySelector: (selector) => elements[selector] ?? null
+  };
+
+  const noopEvent = { addListener() {} };
+  const context = vm.createContext({
+    chrome: {
+      runtime: {
+        connectNative: () => ({ postMessage() {}, onMessage: noopEvent, onDisconnect: noopEvent }),
+        onMessage: noopEvent,
+        onInstalled: noopEvent,
+        onStartup: noopEvent
+      },
+      debugger: { onEvent: noopEvent, onDetach: noopEvent },
+      tabs: { onRemoved: noopEvent, onUpdated: noopEvent },
+      storage: { onChanged: noopEvent }
+    },
+    navigator: { userAgent: "Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36" },
+    document: fakeDocument,
+    MutationObserver: FakeMutationObserver,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    console
+  });
+  vm.runInContext(source, context);
+  const waitFor = (...args) => vm.runInContext(
+    `waitForConditionInPage(${args.map((arg) => JSON.stringify(arg)).join(",")})`,
+    context
+  );
+
+  bodyText = "already loaded";
+  assert.equal(await waitFor("loaded", null, null, "visible", 1000), true);
+
+  bodyText = "";
+  const pending = waitFor("arrived", null, null, "visible", 2000);
+  setTimeout(() => {
+    bodyText = "it arrived";
+    for (const callback of [...mutationCallbacks]) callback();
+  }, 20);
+  assert.equal(await pending, true);
+
+  elements = {};
+  bodyText = "";
+  assert.equal(await waitFor(null, null, "#never", "attached", 100), false);
+
+  elements = { "#visible": { getBoundingClientRect: () => ({ width: 10, height: 10 }) } };
+  assert.equal(await waitFor(null, null, "#visible", "attached", 500), true);
+});
+
 function storageArea(values, notify) {
   return {
     get: async (key) => {

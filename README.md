@@ -218,7 +218,9 @@ Measured warm-call latency through the full stack (MCP client → daemon → nat
 
 If the MCP client's daemon connection drops (for example, another conversation triggers a version-mismatch daemon restart), the client transparently reconnects and resumes on its next call instead of failing permanently.
 
-Per-call latency is close to its practical floor, so the largest remaining lever for multi-step tasks is round trips, not wire speed: `batch_browser_actions` runs a sequence of steps (type, click, wait, etc.) against one tab in a single call instead of one call per step, which matters far more than IPC latency for anything model-driven, since each separate tool call costs a full reasoning turn.
+Per-call latency is close to its practical floor, so the largest remaining lever for multi-step tasks is round trips, not wire speed: `batch_browser_actions` runs a sequence of steps (type, click, wait, etc.) against one tab in a single call instead of one call per step, which matters far more than IPC latency for anything model-driven, since each separate tool call costs a full reasoning turn. Copilot is instructed to default to it for any scenario with a known sequence of steps, falling back to individual tools only when a step depends on a result it doesn't have yet or a batch call itself fails.
+
+`wait_for_browser` resolves via a `MutationObserver` injected into the page instead of polling from the extension every 200ms, so it detects the condition as soon as the DOM actually changes rather than up to 200ms late, in a single CDP round trip. A coarse 500ms safety-net interval still catches style-only changes (e.g. a media query) that don't mutate the DOM tree or attributes. If the page navigates away while waiting, the error names that explicitly instead of reporting a generic timeout.
 
 ## Security boundary
 

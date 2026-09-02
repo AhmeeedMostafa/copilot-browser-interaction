@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createLineDecoder, daemonAddress, writeLine } from "./protocol.mjs";
 
-const VERSION = "0.9.0";
+const VERSION = "0.9.2";
 const daemonScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
 
 const tools = [
@@ -288,7 +288,7 @@ const tools = [
   },
   {
     name: "batch_browser_actions",
-    description: "Run a sequence of actions against one Copilot-owned tab in a single call, without returning to the model between steps. Prefer this over separate calls when performing 3 or more related actions (e.g. filling a form, then submitting) to save round trips. Steps run in order and stop at the first failure unless stopOnError is false. Each action identifier and its args match the equivalent single tool: navigate_tab=navigate_browser_tab, history=browser_tab_history, read_page=read_browser_tab, click=click_browser_element, type=type_in_browser_element, press_key=press_browser_key, hover=hover_browser_element, drag=drag_browser_element, select=select_browser_option, scroll=scroll_browser_tab, wait_for=wait_for_browser, handle_dialog=handle_browser_dialog, highlight_text=highlight_browser_text.",
+    description: "Default choice for any known multi-step scenario on one Copilot-owned tab: plan the whole sequence upfront and run it in a single call instead of one call per step. Steps run in order and stop at the first failure unless stopOnError is false; fall back to the separate single-purpose tools only if the next step depends on a result you don't have yet, or an action isn't supported here (screenshot, console, resize, tab lifecycle). Each action identifier and its args match the equivalent single tool: navigate_tab=navigate_browser_tab, history=browser_tab_history, read_page=read_browser_tab, click=click_browser_element, type=type_in_browser_element, press_key=press_browser_key, hover=hover_browser_element, drag=drag_browser_element, select=select_browser_option, scroll=scroll_browser_tab, wait_for=wait_for_browser, handle_dialog=handle_browser_dialog, highlight_text=highlight_browser_text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -615,7 +615,7 @@ async function handleMessage(message) {
           protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
           serverInfo: { name: "copilot-browser-interaction", version: VERSION },
-          instructions: "Use this server for real-browser and E2E work. FIRST call start_browser_session once per conversation and reuse its sessionId in every later browser tool call. Never reuse or reveal a sessionId from another conversation. Browser connections persist through a per-user daemon shared across VS Code. When the user names Chrome or Edge, pass that browser explicitly. Open a Copilot-owned tab first; user-owned tabs are inaccessible until explicitly shared. Page access follows the extension's approval settings. Prefer batch_browser_actions over separate click/type/wait_for calls when performing 3 or more related actions on the same tab, to avoid a full round trip per step. After finishing, call end_browser_session once without a browser to detach every browser used by this conversation and invalidate its sessionId, unless the user asks to keep debugging attached."
+          instructions: "Use this server for real-browser and E2E work. FIRST call start_browser_session once per conversation and reuse its sessionId in every later browser tool call. Never reuse or reveal a sessionId from another conversation. Browser connections persist through a per-user daemon shared across VS Code. When the user names Chrome or Edge, pass that browser explicitly. Open a Copilot-owned tab first; user-owned tabs are inaccessible until explicitly shared. Do not ask the user to approve a tab before attempting an action; an existing grant or auto-approval may already cover it. Only ask for approval, and retry, after a tool call actually fails with an access-not-approved error. Default to batch_browser_actions for the whole scenario whenever the sequence of steps is known upfront (forms, fixed multi-step flows): plan every step first and send them in one call instead of one call per step. Only fall back to the separate single-purpose tools when the next step depends on a result you don't have yet, the action isn't supported inside a batch (screenshot, console, resize, tab lifecycle), or a batch call itself fails, in which case retry just the remaining steps individually. After finishing, call end_browser_session once without a browser to detach every browser used by this conversation and invalidate its sessionId, unless the user asks to keep debugging attached."
         };
         break;
       case "ping":
