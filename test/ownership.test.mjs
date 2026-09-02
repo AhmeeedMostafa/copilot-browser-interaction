@@ -170,6 +170,48 @@ test("browser commands honor ownership, grouping, and approval modes", async () 
   await assert.rejects(command("read_page", { tabId: 2 }), /Site access is not granted/);
   siteAllowed = true;
   assert.equal((await command("read_page", { tabId: 2 })).title, "Mock page");
+
+  const batchOk = await command("batch", {
+    tabId: 2,
+    actions: [
+      { action: "type", args: { selector: "#a", text: "hello" } },
+      { action: "click", args: { selector: "#b" } }
+    ]
+  });
+  assert.equal(batchOk.results.length, 2);
+  assert.ok(batchOk.results.every((step) => step.ok));
+  assert.deepEqual(Array.from(batchOk.results, (step) => step.action), ["type", "click"]);
+
+  // ponytail: "history" with an invalid action rejects before touching the
+  // debugger, giving a deterministic failure to test stopOnError against.
+  const batchStopped = await command("batch", {
+    tabId: 2,
+    actions: [
+      { action: "type", args: { selector: "#a", text: "one" } },
+      { action: "history", args: { action: "sideways" } },
+      { action: "click", args: { selector: "#c" } }
+    ]
+  });
+  assert.equal(batchStopped.results.length, 2);
+  assert.equal(batchStopped.results[0].ok, true);
+  assert.equal(batchStopped.results[1].ok, false);
+  assert.match(batchStopped.results[1].error, /action must be back, forward, or reload/);
+
+  const batchContinued = await command("batch", {
+    tabId: 2,
+    stopOnError: false,
+    actions: [
+      { action: "history", args: { action: "sideways" } },
+      { action: "type", args: { selector: "#a", text: "two" } }
+    ]
+  });
+  assert.equal(batchContinued.results.length, 2);
+  assert.equal(batchContinued.results[0].ok, false);
+  assert.equal(batchContinued.results[1].ok, true);
+
+  await assert.rejects(command("batch", { tabId: 2, actions: [{ action: "close_tab" }] }), /Unsupported batch action/);
+  await assert.rejects(command("batch", { tabId: 2, actions: [] }), /non-empty array/);
+
   const ended = await command("end_session", { sessionId: "session-a" });
   assert.equal(ended.detachedTabs, 1);
   assert.deepEqual(Array.from(await command("list_tabs"), (tab) => tab.id), [2]);

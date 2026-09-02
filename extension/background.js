@@ -1,6 +1,12 @@
 const HOST_NAME = "dev.copilot.open_tabs_bridge";
 const GROUP_TITLE = "VSC Copilot Mngd";
 const DEBUGGER_VERSION = "1.3";
+// ponytail: keep in sync with the "action" enum in mcp.mjs's
+// batch_browser_actions tool schema.
+const BATCH_ACTIONS = new Set([
+  "navigate_tab", "history", "read_page", "click", "type", "press_key",
+  "hover", "drag", "select", "scroll", "wait_for", "handle_dialog", "highlight_text"
+]);
 
 let nativePort;
 let mcpConnected = false;
@@ -69,9 +75,31 @@ async function runCommand(method, args) {
     case "highlight_text": return highlightText(args);
     case "console": return readConsole(args);
     case "resize": return resizeViewport(args);
+    case "batch": return batchActions(args);
     case "end_session": return endBrowserSession(args);
     default: throw new Error(`Unknown browser command: ${method}`);
   }
+}
+
+async function batchActions({ tabId, actions, stopOnError = true }) {
+  if (!Number.isInteger(tabId)) throw new Error("tabId must be an integer");
+  if (!Array.isArray(actions) || !actions.length) throw new Error("actions must be a non-empty array");
+  if (typeof stopOnError !== "boolean") throw new Error("stopOnError must be a boolean");
+
+  const results = [];
+  for (const step of actions) {
+    if (!step || typeof step !== "object" || !BATCH_ACTIONS.has(step.action)) {
+      throw new Error(`Unsupported batch action: ${step?.action}`);
+    }
+    try {
+      const result = await runCommand(step.action, { ...step.args, tabId });
+      results.push({ action: step.action, ok: true, result });
+    } catch (error) {
+      results.push({ action: step.action, ok: false, error: error.message });
+      if (stopOnError) break;
+    }
+  }
+  return { results };
 }
 
 async function listTabs() {
@@ -271,9 +299,12 @@ async function ensureDebugger(tabId) {
   await chrome.debugger.attach(target, DEBUGGER_VERSION);
   attachedTabs.add(tabId);
   try {
-    await chrome.debugger.sendCommand(target, "Page.enable");
-    await chrome.debugger.sendCommand(target, "Runtime.enable");
-    await chrome.debugger.sendCommand(target, "Log.enable");
+    // ponytail: independent CDP domains, no need to enable one at a time
+    await Promise.all([
+      chrome.debugger.sendCommand(target, "Page.enable"),
+      chrome.debugger.sendCommand(target, "Runtime.enable"),
+      chrome.debugger.sendCommand(target, "Log.enable")
+    ]);
   } catch (error) {
     attachedTabs.delete(tabId);
     await chrome.debugger.detach(target);

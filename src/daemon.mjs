@@ -5,7 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { bridgeAddress, createLineDecoder, daemonAddress, writeLine } from "./protocol.mjs";
 
-const VERSION = "0.8.4";
+const VERSION = "0.9.0";
 const browserMethods = {
   list_browser_tabs: "list_tabs",
   open_browser_tab: "open_tab",
@@ -26,6 +26,7 @@ const browserMethods = {
   highlight_browser_text: "highlight_text",
   read_browser_console: "console",
   resize_browser_viewport: "resize",
+  batch_browser_actions: "batch",
   end_browser_session: "end_session"
 };
 

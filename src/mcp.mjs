@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createLineDecoder, daemonAddress, writeLine } from "./protocol.mjs";
 
-const VERSION = "0.8.4";
+const VERSION = "0.9.0";
 const daemonScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
 
 const tools = [
@@ -287,6 +287,40 @@ const tools = [
     }
   },
   {
+    name: "batch_browser_actions",
+    description: "Run a sequence of actions against one Copilot-owned tab in a single call, without returning to the model between steps. Prefer this over separate calls when performing 3 or more related actions (e.g. filling a form, then submitting) to save round trips. Steps run in order and stop at the first failure unless stopOnError is false. Each action identifier and its args match the equivalent single tool: navigate_tab=navigate_browser_tab, history=browser_tab_history, read_page=read_browser_tab, click=click_browser_element, type=type_in_browser_element, press_key=press_browser_key, hover=hover_browser_element, drag=drag_browser_element, select=select_browser_option, scroll=scroll_browser_tab, wait_for=wait_for_browser, handle_dialog=handle_browser_dialog, highlight_text=highlight_browser_text.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "integer" },
+        actions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 25,
+          items: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: [
+                  "navigate_tab", "history", "read_page", "click", "type",
+                  "press_key", "hover", "drag", "select", "scroll",
+                  "wait_for", "handle_dialog", "highlight_text"
+                ]
+              },
+              args: { type: "object", description: "Arguments for this action, excluding tabId." }
+            },
+            required: ["action"],
+            additionalProperties: false
+          }
+        },
+        stopOnError: { type: "boolean", default: true, description: "Stop at the first failed action. Set false to run every step and report all results." }
+      },
+      required: ["tabId", "actions"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "end_browser_session",
     description: "Finish browser work by detaching debugger sessions and clearing transient console/dialog state. Managed tabs remain open and approved.",
     inputSchema: {
@@ -296,6 +330,10 @@ const tools = [
     }
   }
 ];
+
+const batchActionNames = new Set(
+  tools.find((tool) => tool.name === "batch_browser_actions").inputSchema.properties.actions.items.properties.action.enum
+);
 
 const browserProperty = {
   type: "string",
@@ -506,6 +544,27 @@ function validateArguments(name, args) {
     case "resize_browser_viewport":
       if (!Number.isInteger(args.width) || !Number.isInteger(args.height)) throw new Error("width and height must be integers");
       return;
+    case "batch_browser_actions": {
+      if (!Array.isArray(args.actions) || !args.actions.length) {
+        throw new Error("actions must be a non-empty array");
+      }
+      if (args.actions.length > 25) throw new Error("actions must contain at most 25 steps");
+      if (args.stopOnError !== undefined && typeof args.stopOnError !== "boolean") {
+        throw new Error("stopOnError must be a boolean");
+      }
+      for (const step of args.actions) {
+        if (!step || typeof step !== "object" || Array.isArray(step)) {
+          throw new Error("Each action must be an object");
+        }
+        if (!batchActionNames.has(step.action)) {
+          throw new Error(`Unsupported batch action: ${step.action}`);
+        }
+        if (step.args !== undefined && (typeof step.args !== "object" || Array.isArray(step.args))) {
+          throw new Error("action args must be an object");
+        }
+      }
+      return;
+    }
     default:
       throw Object.assign(new Error(`Unknown tool: ${name}`), { code: -32602 });
   }
@@ -556,7 +615,7 @@ async function handleMessage(message) {
           protocolVersion: message.params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
           serverInfo: { name: "copilot-browser-interaction", version: VERSION },
-          instructions: "Use this server for real-browser and E2E work. FIRST call start_browser_session once per conversation and reuse its sessionId in every later browser tool call. Never reuse or reveal a sessionId from another conversation. Browser connections persist through a per-user daemon shared across VS Code. When the user names Chrome or Edge, pass that browser explicitly. Open a Copilot-owned tab first; user-owned tabs are inaccessible until explicitly shared. Page access follows the extension's approval settings. After finishing, call end_browser_session once without a browser to detach every browser used by this conversation and invalidate its sessionId, unless the user asks to keep debugging attached."
+          instructions: "Use this server for real-browser and E2E work. FIRST call start_browser_session once per conversation and reuse its sessionId in every later browser tool call. Never reuse or reveal a sessionId from another conversation. Browser connections persist through a per-user daemon shared across VS Code. When the user names Chrome or Edge, pass that browser explicitly. Open a Copilot-owned tab first; user-owned tabs are inaccessible until explicitly shared. Page access follows the extension's approval settings. Prefer batch_browser_actions over separate click/type/wait_for calls when performing 3 or more related actions on the same tab, to avoid a full round trip per step. After finishing, call end_browser_session once without a browser to detach every browser used by this conversation and invalidate its sessionId, unless the user asks to keep debugging attached."
         };
         break;
       case "ping":

@@ -40,11 +40,16 @@ test("shared daemon isolates conversations and browsers", async (t) => {
   const toolNames = responses.get(2).result.tools.map((tool) => tool.name);
   assert.equal(toolNames[0], "start_browser_session");
   assert.ok(toolNames.includes("end_browser_session"));
+  assert.ok(toolNames.includes("batch_browser_actions"));
   const browserTools = responses.get(2).result.tools.slice(1);
   for (const tool of browserTools) {
     assert.deepEqual(tool.inputSchema.properties.browser.enum, ["chrome", "edge"]);
     assert.ok(tool.inputSchema.required.includes("sessionId"));
   }
+  const batchTool = responses.get(2).result.tools.find((tool) => tool.name === "batch_browser_actions");
+  assert.ok(batchTool.inputSchema.required.includes("tabId"));
+  assert.ok(batchTool.inputSchema.required.includes("actions"));
+  assert.ok(batchTool.inputSchema.properties.actions.items.properties.action.enum.includes("click"));
 
   const sessionA = await startSession(3);
   const sessionB = await startSession(4);

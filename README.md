@@ -18,6 +18,7 @@ Every Copilot-created tab is placed in the `VSC Copilot Mngd` browser group.
 | Manual sharing | Adopts a user-opened HTTP(S) tab only after **Share this tab with Copilot** is selected |
 | Approval controls | Per-site, per-tab, or opt-in automatic approval for tabs opened by Copilot |
 | Page interaction | Reads text and elements; clicks, types, presses keys, hovers, drags, selects, scrolls, and waits |
+| Batched actions | Runs a sequence of interactions against one tab in a single call instead of one round trip per step |
 | E2E diagnostics | Captures screenshots, console errors, dialogs, responsive viewports, and highlighted text |
 | Session cleanup | Detaches browser debugging and clears transient state without closing managed tabs |
 | Portability | User-level installers for macOS, Linux, and Windows; no administrator access required |
@@ -216,6 +217,8 @@ Approval and mode settings are cached in memory inside the extension and kept co
 Measured warm-call latency through the full stack (MCP client → daemon → native host → extension → Chrome DevTools Protocol): `read_browser_tab` ~2.4ms avg, `click_browser_element` ~2.0ms avg, `type_in_browser_element` ~3.8ms avg, `list_browser_tabs` ~0.8ms avg. This is dominated by Chrome's own CDP command processing, not by local IPC (a bare local-socket round trip on the same hardware costs ~0.02ms), so this is close to the practical floor for browser automation through this protocol.
 
 If the MCP client's daemon connection drops (for example, another conversation triggers a version-mismatch daemon restart), the client transparently reconnects and resumes on its next call instead of failing permanently.
+
+Per-call latency is close to its practical floor, so the largest remaining lever for multi-step tasks is round trips, not wire speed: `batch_browser_actions` runs a sequence of steps (type, click, wait, etc.) against one tab in a single call instead of one call per step, which matters far more than IPC latency for anything model-driven, since each separate tool call costs a full reasoning turn.
 
 ## Security boundary
 
